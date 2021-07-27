@@ -37,12 +37,15 @@ payTrace payment1 payment2 = do
 
     handle <- activateContractWallet (Wallet 1) payContract
 
-    let params1 = PayParams{
-            ppRecipient = pubKeyHash $ walletPubKey $ Wallet 2
+    let convert :: Wallet -> PubKeyHash
+        convert = pubKeyHash . walletPubKey
+        pubKeyHash2 = convert (Wallet 2)
+        params1 = PayParams{
+            ppRecipient = pubKeyHash2
         ,   ppLovelace = payment1
         }
         params2 = PayParams{
-            ppRecipient = pubKeyHash $ walletPubKey $ Wallet 2
+            ppRecipient = pubKeyHash2
         ,   ppLovelace = payment2
         }
  
