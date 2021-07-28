@@ -9,7 +9,8 @@ module Week04.Homework where
 
 import Data.Aeson            (FromJSON, ToJSON)
 import Data.Functor          (void)
-import Data.Text             (Text)
+import Data.Text             (Text, unpack)
+import Data.Void             (Void)
 import GHC.Generics          (Generic)
 import Ledger
 import Ledger.Ada            as Ada
@@ -30,12 +31,16 @@ payContract = do
     pp <- endpoint @"pay"
     let tx = mustPayToPubKey (ppRecipient pp) $ lovelaceValueOf $ ppLovelace pp
     void $ submitTx tx
-    payContract
+
+contractHandler :: Contract () PaySchema Void ()
+contractHandler = do
+    Contract.handleError (\err -> Contract.logError $ " caught: " ++ unpack err) payContract
+    contractHandler
 
 payTrace :: Integer -> Integer -> EmulatorTrace ()
 payTrace payment1 payment2 = do
 
-    handle <- activateContractWallet (Wallet 1) payContract
+    handle <- activateContractWallet (Wallet 1) contractHandler
 
     let convert :: Wallet -> PubKeyHash
         convert = pubKeyHash . walletPubKey
