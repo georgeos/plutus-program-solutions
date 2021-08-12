@@ -252,13 +252,13 @@ firstGame fp = do
                 void $ mapError' $ runStep client ClaimFirst
                 logInfo @String "first player reclaimed stake"
 
-            GameDatum _ (Just c') | c `beats` c' -> do
-                logInfo @String "second player played and lost"
-                void $ mapError' $ runStep client $ Reveal (fpNonce fp) c
-                logInfo @String "first player revealed and won"
-
-            GameDatum _ (Just c') | c' `beats` c -> do
-                logInfo @String "second player won"
+            GameDatum _ (Just c')
+                | c `beats` c' -> do
+                    logInfo @String "second player played and lost"
+                    void $ mapError' $ runStep client $ Reveal (fpNonce fp) c
+                    logInfo @String "first player revealed and won"
+                | c' `beats` c -> do
+                    logInfo @String "second player won"
 
             _ -> do
                 logInfo @String "second player tied"
