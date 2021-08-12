@@ -82,7 +82,7 @@ instance Eq GameDatum where
 
 PlutusTx.unstableMakeIsData ''GameDatum
 
-data GameRedeemer = Play GameChoice | Reveal ByteString GameChoice | ClaimFirst | ClaimSecond | WithdrawFirst GameChoice | WithdrawSecond
+data GameRedeemer = Play GameChoice | Reveal ByteString GameChoice | ClaimFirst | ClaimSecond | WithdrawFirst ByteString GameChoice | WithdrawSecond
     deriving Show
 
 PlutusTx.unstableMakeIsData ''GameRedeemer
@@ -121,7 +121,7 @@ transition game s r = case (stateValue s, stateData s, r) of
                                                         Constraints.mustValidateIn (from $ 1 + gRevealDeadline game),
                                                         State Finished mempty
                                                     )
-    (v, GameDatum _ (Just _), WithdrawFirst c )   -- When first player withdraws
+    (v, GameDatum _ (Just _), WithdrawFirst _ c )   -- When first player withdraws
         | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
                                                         Constraints.mustValidateIn (to $ gRevealDeadline game),
                                                         State (GameDatum emptyByteString $ Just c) (lovelaceValueOf $ gStake game)
@@ -141,6 +141,13 @@ final _        = False
 {-# INLINABLE check #-}
 check :: ByteString -> ByteString -> ByteString -> GameDatum -> GameRedeemer -> ScriptContext -> Bool
 check bsRock' bsScissor' bsPaper' (GameDatum bs (Just _)) (Reveal nonce choice) _ =
+    sha2_256 (nonce `concatenate`
+        case choice of
+            Rock    -> bsRock'
+            Scissor -> bsScissor'
+            _       -> bsPaper'
+    ) == bs
+check bsRock' bsScissor' bsPaper' (GameDatum bs (Just _)) (WithdrawFirst nonce choice) _ =
     sha2_256 (nonce `concatenate`
         case choice of
             Rock    -> bsRock'
@@ -245,21 +252,18 @@ firstGame fp = do
                 void $ mapError' $ runStep client ClaimFirst
                 logInfo @String "first player reclaimed stake"
 
-            GameDatum _ (Just c') -> do
-                if c `beats` c'
-                    then do
-                        logInfo @String "second player played and lost"
-                        void $ mapError' $ runStep client $ Reveal (fpNonce fp) c
-                        logInfo @String "first player revealed and won"
-                    else do
-                        if c' `beats` c
-                            then logInfo @String "second player won"
-                            else do
-                                logInfo @String "second player tied"
-                                void $ mapError' $ runStep client $ WithdrawFirst c
-                                logInfo @String "first player claimed by tie"                            
+            GameDatum _ (Just c') | c `beats` c' -> do
+                logInfo @String "second player played and lost"
+                void $ mapError' $ runStep client $ Reveal (fpNonce fp) c
+                logInfo @String "first player revealed and won"
 
-            _ -> throwError "unexpected datum"
+            GameDatum _ (Just c') | c' `beats` c -> do
+                logInfo @String "second player won"
+
+            _ -> do
+                logInfo @String "second player tied"
+                void $ mapError' $ runStep client $ WithdrawFirst (fpNonce fp) c
+                logInfo @String "first player claimed by tie"                         
 
 data SecondParams = SecondParams
     { spFirst          :: !PubKeyHash
@@ -282,7 +286,6 @@ secondGame sp = do
             , gToken          = spToken sp
             }
         client = gameClient game
-        c2      = spChoice sp
     m <- mapError' $ getOnChainState client
     case m of
         Nothing          -> logInfo @String "no running game found"
@@ -297,18 +300,18 @@ secondGame sp = do
                 m' <- mapError' $ getOnChainState client
                 case m' of
                     Nothing             -> logInfo @String "first player won"
+
                     Just ((d, _), _)    -> case tyTxOutData d of
-                        GameDatum bs (Just c') -> do
-                            if bs == emptyByteString
-                                then do
-                                    logInfo @String "tie found"
-                                    void $ mapError' $ runStep client WithdrawSecond
-                                    logInfo @String "second player claimed by tie"
-                                else do
-                                    logInfo @String "first player didn't claim and didn't reveal"
-                                    void $ mapError' $ runStep client ClaimSecond
-                                    logInfo @String "second player won"
-                        _ -> throwError "unexpected datum"
+
+                        GameDatum bs (Just _) | bs == emptyByteString -> do
+                            logInfo @String "tie found"
+                            void $ mapError' $ runStep client WithdrawSecond
+                            logInfo @String "second player claimed by tie"
+
+                        _ -> do
+                            logInfo @String "first player didn't claim and didn't reveal"
+                            void $ mapError' $ runStep client ClaimSecond
+                            logInfo @String "second player won"
 
             _ -> throwError "unexpected datum"
 
