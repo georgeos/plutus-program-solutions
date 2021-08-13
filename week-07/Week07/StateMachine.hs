@@ -11,7 +11,7 @@
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
 
-module Week07.RockPaperScissors
+module Week07.StateMachine
     ( Game (..)
     , GameChoice (..)
     , FirstParams (..)
@@ -52,25 +52,18 @@ data Game = Game
 
 PlutusTx.makeLift ''Game
 
-data GameChoice = Rock | Paper | Scissor
+data GameChoice = Zero | One
     deriving (Show, Generic, FromJSON, ToJSON, ToSchema, Prelude.Eq, Prelude.Ord)
 
 instance Eq GameChoice where
     {-# INLINABLE (==) #-}
-    Rock    == Rock     = True
-    Paper   == Paper    = True
-    Scissor == Scissor  = True
-    _       == _        = False
+    Zero == Zero = True
+    One  == One  = True
+    _    == _    = False
 
 PlutusTx.unstableMakeIsData ''GameChoice
 
-{-# INLINABLE beats #-}
-beats :: GameChoice -> GameChoice -> Bool
-beats Rock      Scissor = True
-beats Paper     Rock    = True
-beats Scissor   Paper   = True
-beats _         _       = False
-
+-- Datum Finished in order to define final state of state machine
 data GameDatum = GameDatum ByteString (Maybe GameChoice) | Finished
     deriving Show
 
@@ -82,7 +75,7 @@ instance Eq GameDatum where
 
 PlutusTx.unstableMakeIsData ''GameDatum
 
-data GameRedeemer = Play GameChoice | Reveal ByteString GameChoice | ClaimFirst | ClaimSecond | WithdrawFirst ByteString GameChoice | WithdrawSecond
+data GameRedeemer = Play GameChoice | Reveal ByteString | ClaimFirst | ClaimSecond
     deriving Show
 
 PlutusTx.unstableMakeIsData ''GameRedeemer
@@ -98,94 +91,85 @@ gameDatum o f = do
     Datum d <- f dh
     PlutusTx.fromBuiltinData d
 
+-- Transition function of the state machine
+-- Corresponds to make validator
 {-# INLINABLE transition #-}
-transition :: Game -> State GameDatum -> GameRedeemer -> Maybe(TxConstraints Void Void, State GameDatum)
+transition :: Game -> State GameDatum -> GameRedeemer -> Maybe (TxConstraints Void Void, State GameDatum)
+-- s -> State: Datum (stateData) and value (stateValue)
+-- r -> Redeemer
+-- :i StateMachine
 transition game s r = case (stateValue s, stateData s, r) of
-    (v, GameDatum bs Nothing, Play c)       -- When second player moves
-        | lovelaces v == gStake game        -> Just(    Constraints.mustBeSignedBy (gSecond game) <>
-                                                        Constraints.mustValidateIn (to $ gPlayDeadline game),
-                                                        State (GameDatum bs $ Just c) (lovelaceValueOf $ 2 * gStake game)
-                                                    )
-    (v, GameDatum _ (Just _), Reveal _ _)  -- When first player reveals
-        | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
-                                                        Constraints.mustValidateIn (to $ gRevealDeadline game),
-                                                        State Finished mempty
-                                                    )
-    (v, GameDatum _ Nothing, ClaimFirst)    -- When first player claims by a victory
-        | lovelaces v == gStake game        -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
-                                                        Constraints.mustValidateIn (from $ 1 + gPlayDeadline game),
-                                                        State Finished mempty
-                                                    )
-    (v, GameDatum _ (Just _), ClaimSecond)  -- When second player claims by a victory
-        | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gSecond game) <>
-                                                        Constraints.mustValidateIn (from $ 1 + gRevealDeadline game),
-                                                        State Finished mempty
-                                                    )
-    (v, GameDatum _ (Just _), WithdrawFirst _ c )   -- When first player withdraws
-        | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
-                                                        Constraints.mustValidateIn (to $ gRevealDeadline game),
-                                                        State (GameDatum emptyByteString $ Just c) (lovelaceValueOf $ gStake game)
-                                                    )
-    (v, GameDatum _ (Just _), WithdrawSecond)         -- When second player withdraws
-        | lovelaces v == gStake game        -> Just(    Constraints.mustBeSignedBy (gSecond game) <>
-                                                        Constraints.mustValidateIn (from $ 1 + gRevealDeadline game),
-                                                        State Finished mempty
-                                                    )
+    -- Validate stake is equal to value (in Datum)
+    (v, GameDatum bs Nothing, Play c)
+        | lovelaces v == gStake game         -> Just ( Constraints.mustBeSignedBy (gSecond game)                    <>
+                                                       Constraints.mustValidateIn (to $ gPlayDeadline game)
+                                                    --    New state: Datum and value
+                                                     , State (GameDatum bs $ Just c) (lovelaceValueOf $ 2 * gStake game)
+                                                     )
+    (v, GameDatum _ (Just _), Reveal _)
+        | lovelaces v == (2 * gStake game)   -> Just ( Constraints.mustBeSignedBy (gFirst game)                     <>
+                                                       Constraints.mustValidateIn (to $ gRevealDeadline game)
+                                                     , State Finished mempty
+                                                     )
+    (v, GameDatum _ Nothing, ClaimFirst)
+        | lovelaces v == gStake game         -> Just ( Constraints.mustBeSignedBy (gFirst game)                     <>
+                                                       Constraints.mustValidateIn (from $ 1 + gPlayDeadline game)
+                                                     , State Finished mempty
+                                                     )
+    (v, GameDatum _ (Just _), ClaimSecond)
+        | lovelaces v == (2 * gStake game)   -> Just ( Constraints.mustBeSignedBy (gSecond game)                    <>
+                                                       Constraints.mustValidateIn (from $ 1 + gRevealDeadline game)
+                                                     , State Finished mempty
+                                                     )
     _                                        -> Nothing
 
+-- Datum defined by transitions
 {-# INLINABLE final #-}
 final :: GameDatum -> Bool
 final Finished = True
 final _        = False
 
+-- Check nonce
+-- When second player has moved and first player reveals
+-- This is used in Reveal step, in order to validate move of the First player, if hash == nonce + choice
 {-# INLINABLE check #-}
-check :: ByteString -> ByteString -> ByteString -> GameDatum -> GameRedeemer -> ScriptContext -> Bool
-check bsRock' bsScissor' bsPaper' (GameDatum bs (Just _)) (Reveal nonce choice) _ =
-    sha2_256 (nonce `concatenate`
-        case choice of
-            Rock    -> bsRock'
-            Scissor -> bsScissor'
-            _       -> bsPaper'
-    ) == bs
-check bsRock' bsScissor' bsPaper' (GameDatum bs (Just _)) (WithdrawFirst nonce choice) _ =
-    sha2_256 (nonce `concatenate`
-        case choice of
-            Rock    -> bsRock'
-            Scissor -> bsScissor'
-            _       -> bsPaper'
-    ) == bs
-check _       _      _                       _              _   _ = True
+check :: ByteString -> ByteString -> GameDatum -> GameRedeemer -> ScriptContext -> Bool
+check bsZero' bsOne' (GameDatum bs (Just c)) (Reveal nonce) _ =
+    sha2_256 (nonce `concatenate` if c == Zero then bsZero' else bsOne') == bs
+check _       _      _                       _              _ = True
 
+-- Define state machine
+-- Four parameters in constructor: transition function, final, check and NFT
 {-# INLINABLE gameStateMachine #-}
-gameStateMachine :: Game -> ByteString -> ByteString -> ByteString -> StateMachine GameDatum GameRedeemer
-gameStateMachine game bsRock' bsScissor' bsPaper' = StateMachine
+gameStateMachine :: Game -> ByteString -> ByteString -> StateMachine GameDatum GameRedeemer
+gameStateMachine game bsZero' bsOne' = StateMachine
     { smTransition  = transition game
     , smFinal       = final
-    , smCheck       = check bsRock' bsScissor' bsPaper'
+    , smCheck       = check bsZero' bsOne'
     , smThreadToken = Just $ gToken game
     }
 
 {-# INLINABLE mkGameValidator #-}
-mkGameValidator :: Game -> ByteString -> ByteString -> ByteString -> GameDatum -> GameRedeemer -> ScriptContext -> Bool
-mkGameValidator game bsRock' bsScissor' bsPaper' = mkValidator $ gameStateMachine game bsRock' bsScissor' bsPaper'
+mkGameValidator :: Game -> ByteString -> ByteString -> GameDatum -> GameRedeemer -> ScriptContext -> Bool
+mkGameValidator game bsZero' bsOne' = mkValidator $ gameStateMachine game bsZero' bsOne'
 
 type Gaming = StateMachine GameDatum GameRedeemer
 
-bsRock, bsScissor, bsPaper :: ByteString
-bsRock      = "R"
-bsScissor   = "S"
-bsPaper     = "P"
+bsZero, bsOne :: ByteString
+bsZero = "0"
+bsOne  = "1"
 
+-- Second version of gameStateMachine for off-chain code (doesnt provide bytestrings)
+-- It works on off-chain code, not in on-chain code
 gameStateMachine' :: Game -> StateMachine GameDatum GameRedeemer
-gameStateMachine' game = gameStateMachine game bsRock bsScissor bsPaper
+gameStateMachine' game = gameStateMachine game bsZero bsOne
 
 typedGameValidator :: Game -> Scripts.TypedValidator Gaming
 typedGameValidator game = Scripts.mkTypedValidator @Gaming
     ($$(PlutusTx.compile [|| mkGameValidator ||])
         `PlutusTx.applyCode` PlutusTx.liftCode game
-        `PlutusTx.applyCode` PlutusTx.liftCode bsRock
-        `PlutusTx.applyCode` PlutusTx.liftCode bsScissor
-        `PlutusTx.applyCode` PlutusTx.liftCode bsPaper)
+        `PlutusTx.applyCode` PlutusTx.liftCode bsZero
+        `PlutusTx.applyCode` PlutusTx.liftCode bsOne)
     $$(PlutusTx.compile [|| wrap ||])
   where
     wrap = Scripts.wrapValidator @GameDatum @GameRedeemer
@@ -196,8 +180,10 @@ gameValidator = Scripts.validatorScript . typedGameValidator
 gameAddress :: Game -> Ledger.Address
 gameAddress = scriptAddress . gameValidator
 
--- OFFCHAIN CODE
+-- OFF-CHAIN code
 
+-- An State machine client
+-- Basically what we need to interact with state machine from our wallet (our contract monad)
 gameClient :: Game -> StateMachineClient GameDatum GameRedeemer
 gameClient game = mkStateMachineClient $ StateMachineInstance (gameStateMachine' game) (typedGameValidator game)
 
@@ -231,39 +217,38 @@ firstGame fp = do
         client = gameClient game
         v      = lovelaceValueOf (fpStake fp)
         c      = fpChoice fp
-        bs     = sha2_256 $ fpNonce fp `concatenate`
-            case c of
-                Rock    -> bsRock
-                Scissor -> bsScissor
-                _       -> bsPaper
+        bs     = sha2_256 $ fpNonce fp `concatenate` if c == Zero then bsZero else bsOne
+    -- Create a UTXO at the state machine address to start state machine: put NFT, Datum and value
     void $ mapError' $ runInitialise client (GameDatum bs Nothing) v
     logInfo @String $ "made first move: " ++ show (fpChoice fp)
     tell $ Last $ Just tt
 
     waitUntilTimeHasPassed $ fpPlayDeadline fp
 
+    -- getOnChainState: Plutus-Contract-StateMachine.html#t:OnChainState
+    -- OnChainState uses: TypedScriptTxOut: bundle TxOut and DatumType
+    -- In off-chain we write helper functions to access Datum when once we have found UTXO. We have to look at the DatumHash, which could fail, so on.
+    -- https://youtu.be/uwZ903Zd0DU?t=4278
     m <- mapError' $ getOnChainState client
     case m of
         Nothing             -> throwError "game output not found"
+        -- tyTxOutData o: Get the Datum
         Just ((o, _), _) -> case tyTxOutData o of
 
             GameDatum _ Nothing -> do
                 logInfo @String "second player did not play"
+                -- runStep: create a transition in the statemachine.
+                -- Parameter 1: stateMachineClient
+                -- Parameter 2: Redeemer
                 void $ mapError' $ runStep client ClaimFirst
                 logInfo @String "first player reclaimed stake"
 
-            GameDatum _ (Just c')
-                | c `beats` c' -> do
-                    logInfo @String "second player played and lost"
-                    void $ mapError' $ runStep client $ Reveal (fpNonce fp) c
-                    logInfo @String "first player revealed and won"
-                | c' `beats` c -> do
-                    logInfo @String "second player won"
+            GameDatum _ (Just c') | c' == c -> do
+                logInfo @String "second player played and lost"
+                void $ mapError' $ runStep client $ Reveal $ fpNonce fp
+                logInfo @String "first player revealed and won"
 
-            _ -> do
-                logInfo @String "second player tied"
-                void $ mapError' $ runStep client $ WithdrawFirst (fpNonce fp) c
-                logInfo @String "first player claimed by tie"                         
+            _ -> logInfo @String "second player played and won"
 
 data SecondParams = SecondParams
     { spFirst          :: !PubKeyHash
@@ -292,26 +277,19 @@ secondGame sp = do
         Just ((o, _), _) -> case tyTxOutData o of
             GameDatum _ Nothing -> do
                 logInfo @String "running game found"
-                logInfo @String $ "made second move: " ++ show (spChoice sp)
                 void $ mapError' $ runStep client $ Play $ spChoice sp
+                logInfo @String $ "made second move: " ++ show (spChoice sp)
 
                 waitUntilTimeHasPassed $ spRevealDeadline sp
 
                 m' <- mapError' $ getOnChainState client
                 case m' of
-                    Nothing             -> logInfo @String "first player won"
-
-                    Just ((d, _), _)    -> case tyTxOutData d of
-
-                        GameDatum bs (Just _) | bs == emptyByteString -> do
-                            logInfo @String "tie found"
-                            void $ mapError' $ runStep client WithdrawSecond
-                            logInfo @String "second player claimed by tie"
-
-                        _ -> do
-                            logInfo @String "first player didn't claim and didn't reveal"
-                            void $ mapError' $ runStep client ClaimSecond
-                            logInfo @String "second player won"
+                    -- If there is not a new state, means game finished and first player won.
+                    Nothing -> logInfo @String "first player won"
+                    Just _  -> do
+                        logInfo @String "first player didn't reveal"
+                        void $ mapError' $ runStep client ClaimSecond
+                        logInfo @String "second player won"
 
             _ -> throwError "unexpected datum"
 
