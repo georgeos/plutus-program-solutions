@@ -108,27 +108,32 @@ transition game s r = case (stateValue s, stateData s, r) of
                                                     )
     (v, GameDatum _ (Just _), Reveal _ _)  -- When first player reveals
         | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
-                                                        Constraints.mustValidateIn (to $ gRevealDeadline game),
+                                                        Constraints.mustValidateIn (to $ gRevealDeadline game) <>
+                                                        Constraints.mustPayToPubKey (gFirst game) (lovelaceValueOf $ 2 * gStake game),
                                                         State Finished mempty
                                                     )
     (v, GameDatum _ Nothing, ClaimFirst)    -- When first player claims by a victory
         | lovelaces v == gStake game        -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
-                                                        Constraints.mustValidateIn (from $ 1 + gPlayDeadline game),
+                                                        Constraints.mustValidateIn (from $ 1 + gPlayDeadline game) <>
+                                                        Constraints.mustPayToPubKey (gFirst game) (lovelaceValueOf $ gStake game),
                                                         State Finished mempty
                                                     )
     (v, GameDatum _ (Just _), ClaimSecond)  -- When second player claims by a victory
         | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gSecond game) <>
-                                                        Constraints.mustValidateIn (from $ 1 + gRevealDeadline game),
+                                                        Constraints.mustValidateIn (from $ 1 + gRevealDeadline game) <>
+                                                        Constraints.mustPayToPubKey (gSecond game) (lovelaceValueOf $ 2 * gStake game),
                                                         State Finished mempty
                                                     )
     (v, GameDatum _ (Just _), WithdrawFirst _ c )   -- When first player withdraws
         | lovelaces v == 2 * gStake game    -> Just(    Constraints.mustBeSignedBy (gFirst game) <>
-                                                        Constraints.mustValidateIn (to $ gRevealDeadline game),
+                                                        Constraints.mustValidateIn (to $ gRevealDeadline game) <>
+                                                        Constraints.mustPayToPubKey (gFirst game) (lovelaceValueOf $ gStake game),
                                                         State (GameDatum emptyByteString $ Just c) (lovelaceValueOf $ gStake game)
                                                     )
     (v, GameDatum _ (Just _), WithdrawSecond)         -- When second player withdraws
         | lovelaces v == gStake game        -> Just(    Constraints.mustBeSignedBy (gSecond game) <>
-                                                        Constraints.mustValidateIn (from $ 1 + gRevealDeadline game),
+                                                        Constraints.mustValidateIn (from $ 1 + gRevealDeadline game) <>
+                                                        Constraints.mustPayToPubKey (gSecond game) (lovelaceValueOf $ gStake game),
                                                         State Finished mempty
                                                     )
     _                                        -> Nothing
