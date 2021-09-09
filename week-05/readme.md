@@ -41,3 +41,31 @@ txInfoForge :: Value
 - Validation script: Datum, Redeemer and Context
 - Minting policies script: Redeemer, Context (because Datum sits on something that is spent)
 - Added to .cabal file on ```build-depends: bytestring ^>=0.10.12.0```
+
+## fmap
+
+    :t fmap
+    map (+ 1) [1 :: Int, 2, 3]
+    fmap (+ 1) [1 :: Int, 2, 3]
+    (+ 1) <$> [1 :: Int, 2, 3]
+
+    do
+        pk <- Contract.ownPubKey
+        let pkh = pubKeyHash pk
+
+    do
+        pkh <- pubKeyHash <$> Contract.ownPubKey
+
+Explanation
+
+    :t fmap
+    -- f => (a -> b) -> f a -> f b
+    -- Contract => (PubKey -> PubKeyHash) -> Contract PubKey -> Contract PubKeyHash
+    -- Contract => function pubKeyHash -> pubKey -> pubKeyHash
+    fmap pubKeyHash Contract.ownPubKey
+    pubKeyHash <$> Contract.ownPubKey
+
+## any
+Returns true if any satisfies the condition
+
+    any even [2 :: Int, 3, 5]
